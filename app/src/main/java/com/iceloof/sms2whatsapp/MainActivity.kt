@@ -16,17 +16,45 @@ import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
-@Suppress("DEPRECATION")
 class MainActivity : AppCompatActivity() {
     private lateinit var phoneNumberEditText: EditText
     private lateinit var saveButton: Button
     private lateinit var checkPermissionsButton: Button
     private lateinit var devicePolicyManager: DevicePolicyManager
     private lateinit var compName: ComponentName
+
+    // Activity result launchers for modern permission handling
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val deniedPermissions = permissions.filterValues { !it }.keys
+        if (deniedPermissions.isEmpty()) {
+            Toast.makeText(this, "All permissions are granted", Toast.LENGTH_SHORT).show()
+        } else {
+            Log.d("MainActivity", "Denied permissions: $deniedPermissions")
+        }
+    }
+
+    private val enableDeviceAdminLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (devicePolicyManager.isAdminActive(compName)) {
+            Log.d("MainActivity", "Device admin enabled successfully")
+        }
+    }
+
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (Settings.canDrawOverlays(this)) {
+            Log.d("MainActivity", "Overlay permission granted")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,25 +76,40 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Load saved phone number
-        val sharedPref = getSharedPreferences("SMS2WhatsAppPreferences", Context.MODE_PRIVATE)
-        val savedPhoneNumber = sharedPref.getString("phoneNumber", null)
-        phoneNumberEditText.setText(savedPhoneNumber)
+        try {
+            val savedPhoneNumber = SecurePreferences.getPhoneNumber(this)
+            phoneNumberEditText.setText(savedPhoneNumber)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error loading phone number", e)
+            Toast.makeText(this, "Error loading saved data", Toast.LENGTH_SHORT).show()
+        }
 
-    }
-
-    companion object {
-        const val REQUEST_CODE_SYSTEM_ALERT_WINDOW = 1234
-        private const val REQUEST_CODE_ENABLE_ADMIN = 1
     }
 
     private fun savePhoneNumber() {
-        val phoneNumber = phoneNumberEditText.text.toString()
-        val sharedPref = getSharedPreferences("SMS2WhatsAppPreferences", Context.MODE_PRIVATE)
-        with(sharedPref.edit()) {
-            putString("phoneNumber", phoneNumber)
-            apply()
+        val phoneNumber = phoneNumberEditText.text.toString().trim()
+
+        // Validate phone number
+        if (phoneNumber.isEmpty()) {
+            Toast.makeText(this, "Please enter a phone number", Toast.LENGTH_SHORT).show()
+            return
         }
-        Toast.makeText(this, "Phone number saved", Toast.LENGTH_SHORT).show()
+
+        // Basic phone number validation: must contain only digits, +, -, (, ), and spaces
+        // Must have at least MIN_PHONE_DIGITS digits
+        val digitsOnly = phoneNumber.replace(Regex("[^0-9]"), "")
+        if (digitsOnly.length < Constants.MIN_PHONE_DIGITS) {
+            Toast.makeText(this, "Invalid phone number. Must have at least ${Constants.MIN_PHONE_DIGITS} digits", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            SecurePreferences.savePhoneNumber(this, phoneNumber)
+            Toast.makeText(this, "Phone number saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error saving phone number", e)
+            Toast.makeText(this, "Error saving phone number", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun checkPermissions() {
@@ -82,13 +125,13 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
             intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, compName)
             intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "This app require device admin permission.")
-            startActivityForResult(intent, REQUEST_CODE_ENABLE_ADMIN)
+            enableDeviceAdminLauncher.launch(intent)
         }
 
         // Request SYSTEM_ALERT_WINDOW permission if not granted
         if (!Settings.canDrawOverlays(this)) {
             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            startActivityForResult(intent, REQUEST_CODE_SYSTEM_ALERT_WINDOW)
+            overlayPermissionLauncher.launch(intent)
         }
     }
 
@@ -101,35 +144,15 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.BIND_DEVICE_ADMIN
         )
 
-        val permissionsToRequest = permissions.filter {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED
+        val permissionsToRequest = permissions.filter { permission ->
+            ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
         }
 
         if (permissionsToRequest.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), 1)
+            requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
             // All permissions are granted
             Toast.makeText(this, "All permissions are granted", Toast.LENGTH_SHORT).show()
-        }
-
-
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 1) {
-            val deniedPermissions = permissions.filterIndexed { index, _ ->
-                grantResults[index] != PackageManager.PERMISSION_GRANTED
-            }
-
-            if (deniedPermissions.isEmpty()) {
-                // All permissions are granted
-                Toast.makeText(this, "All permissions are granted", Toast.LENGTH_SHORT).show()
-            }
-//            else {
-//                // Some permissions are denied
-//                Toast.makeText(this, "Permissions denied: $deniedPermissions", Toast.LENGTH_SHORT).show()
-//            }
         }
     }
 
